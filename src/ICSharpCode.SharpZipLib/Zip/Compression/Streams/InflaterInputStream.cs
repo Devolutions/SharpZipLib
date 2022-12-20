@@ -126,6 +126,24 @@ namespace ICSharpCode.SharpZipLib.Zip.Compression.Streams
 		}
 
 		/// <summary>
+		/// Resize input buffer according to a specific array size
+		/// </summary>
+		/// <param name="bufferSize"></param>		
+		public void ResizeBuffer(int bufferSize)
+		{
+			if (available == 0)
+			{
+				int oldSize = rawData.Length;
+				byte[] resized = rawData;
+				Array.Resize(ref resized, bufferSize);
+				rawData = resized;
+				rawLength = rawData.Length;
+				clearText = rawData;
+				clearTextLength = clearText.Length;
+			}
+		}
+
+		/// <summary>
 		/// Fill the buffer from the underlying input stream.
 		/// </summary>
 		public void Fill()
@@ -738,7 +756,7 @@ namespace ICSharpCode.SharpZipLib.Zip.Compression.Streams
 		/// <summary>
 		/// Base stream the inflater reads from.
 		/// </summary>
-		private Stream baseInputStream;
+		protected Stream baseInputStream;
 
 		/// <summary>
 		/// The compressed size

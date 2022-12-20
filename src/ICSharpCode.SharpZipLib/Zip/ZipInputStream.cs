@@ -6,6 +6,7 @@ using System.Diagnostics;
 using System.IO;
 using ICSharpCode.SharpZipLib.Core;
 using ICSharpCode.SharpZipLib.Zip.Compression;
+using ICSharpCode.SharpZipLib.Zip.Deflate64;
 
 namespace ICSharpCode.SharpZipLib.Zip
 {
@@ -73,6 +74,9 @@ namespace ICSharpCode.SharpZipLib.Zip
 
 		private Crc32 crc = new Crc32();
 		private ZipEntry entry;
+
+		Deflate64Stream inputDeflate64Stream;
+		byte[] buffer;
 
 		private long size;
 		private int flags;
@@ -203,6 +207,12 @@ namespace ICSharpCode.SharpZipLib.Zip
 				CloseEntry();
 			}
 
+			int bufferSize = inputBuffer.RawData.Length;
+			//Resize the input buffer in order to read file information only and keep the correct position in the stream
+			//needed for forward-only stream support
+			//At first step is needed to read the header and after that the file info
+			inputBuffer.ResizeBuffer(ZipConstants.LocalHeaderBaseSize);
+
 			if (!SkipUntilNextEntry())
 			{
 				Dispose();
@@ -222,12 +232,17 @@ namespace ICSharpCode.SharpZipLib.Zip
 
 			bool isCrypted = (flags & 1) == 1;
 
+			//Resize to read the file name and extra data if available
+			inputBuffer.ResizeBuffer(nameLen + extraLen);
 			byte[] buffer = new byte[nameLen];
 			inputBuffer.ReadRawBuffer(buffer);
 
 			var entryEncoding = _stringCodec.ZipInputEncoding(flags);
 			string name = entryEncoding.GetString(buffer);
 			var unicode = entryEncoding.IsZipUnicode();
+
+			//Back to the original size
+			inputBuffer.ResizeBuffer(bufferSize);
 
 			entry = new ZipEntry(name, versionRequiredToExtract, ZipConstants.VersionMadeBy, method, unicode)
 			{
@@ -302,6 +317,12 @@ namespace ICSharpCode.SharpZipLib.Zip
 				{
 					throw new ZipException("Stored, but compressed != uncompressed");
 				}
+			}
+			else if (method == CompressionMethod.Deflate64)
+			{
+				//All the needed information for decompression is gathered, no need to proceed
+				this.inputDeflate64Stream = null;
+				return entry;
 			}
 
 			// Determine how to handle reading of data if this is attempted.
@@ -485,6 +506,12 @@ namespace ICSharpCode.SharpZipLib.Zip
 			{
 				csize += ZipConstants.AESAuthCodeLength;
 			}			
+
+			if (entry.CompressionMethod == CompressionMethod.Deflate64)
+			{
+				//There is no need of inputBuffer processing, all information is available; this would move the stream position
+				return;
+			}
 
 			if (entry.CompressionMethod == CompressionMethod.Deflated)
 			{
@@ -762,7 +789,18 @@ namespace ICSharpCode.SharpZipLib.Zip
 				throw new ArgumentException("Invalid offset/count combination");
 			}
 
-			return internalReader(buffer, offset, count);
+			if (entry.CompressionMethod == CompressionMethod.Deflate64)
+			{
+				if (inputDeflate64Stream == null)
+				{
+					inputDeflate64Stream = new Deflate64Stream(base.baseInputStream, entry.CompressedSize);
+				}
+				return inputDeflate64Stream.Read(buffer, 0, count);
+			}
+			else
+			{
+				return internalReader(buffer, offset, count);
+			}
 		}
 
 		/// <summary>
