@@ -7,6 +7,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -313,7 +314,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 	/// }
 	/// </code>
 	/// </example>
-	public class ZipFile : IEnumerable, IDisposable
+	public class ZipFile : IEnumerable<ZipEntry>, IDisposable
 	{
 		#region KeyHandling
 
@@ -390,6 +391,23 @@ namespace ICSharpCode.SharpZipLib.Zip
 		/// Opens a Zip file with the given name for reading.
 		/// </summary>
 		/// <param name="name">The name of the file to open.</param>
+		/// <exception cref="ArgumentNullException">The argument supplied is null.</exception>
+		/// <exception cref="IOException">
+		/// An i/o error occurs
+		/// </exception>
+		/// <exception cref="ZipException">
+		/// The file doesn't contain a valid zip archive.
+		/// </exception>
+		public ZipFile(string name) : 
+			this(name, null) 
+		{ 
+
+		}
+
+		/// <summary>
+		/// Opens a Zip file with the given name for reading.
+		/// </summary>
+		/// <param name="name">The name of the file to open.</param>
 		/// <param name="stringCodec"></param>
 		/// <exception cref="ArgumentNullException">The argument supplied is null.</exception>
 		/// <exception cref="IOException">
@@ -398,7 +416,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 		/// <exception cref="ZipException">
 		/// The file doesn't contain a valid zip archive.
 		/// </exception>
-		public ZipFile(string name, StringCodec stringCodec = null)
+		public ZipFile(string name, StringCodec stringCodec)
 		{
 			name_ = name ?? throw new ArgumentNullException(nameof(name));
 
@@ -516,7 +534,31 @@ namespace ICSharpCode.SharpZipLib.Zip
 		/// <exception cref="ArgumentNullException">
 		/// The <see cref="Stream">stream</see> argument is null.
 		/// </exception>
-		public ZipFile(Stream stream, bool leaveOpen)
+		public ZipFile(Stream stream, bool leaveOpen) : 
+			this(stream, leaveOpen, null) 
+		{ 
+		
+		}
+
+		/// <summary>
+		/// Opens a Zip file reading the given <see cref="Stream"/>.
+		/// </summary>
+		/// <param name="stream">The <see cref="Stream"/> to read archive data from.</param>
+		/// <param name="leaveOpen">true to leave the <see cref="Stream">stream</see> open when the ZipFile is disposed, false to dispose of it</param>
+		/// <param name="stringCodec"></param>
+		/// <exception cref="IOException">
+		/// An i/o error occurs
+		/// </exception>
+		/// <exception cref="ZipException">
+		/// The stream doesn't contain a valid zip archive.<br/>
+		/// </exception>
+		/// <exception cref="ArgumentException">
+		/// The <see cref="Stream">stream</see> doesnt support seeking.
+		/// </exception>
+		/// <exception cref="ArgumentNullException">
+		/// The <see cref="Stream">stream</see> argument is null.
+		/// </exception>
+		public ZipFile(Stream stream, bool leaveOpen, StringCodec stringCodec)
 		{
 			if (stream == null)
 			{
@@ -530,6 +572,11 @@ namespace ICSharpCode.SharpZipLib.Zip
 
 			baseStream_ = stream;
 			isStreamOwner = !leaveOpen;
+
+			if (stringCodec != null)
+			{
+				_stringCodec = stringCodec;
+			}
 
 			if (baseStream_.Length > 0)
 			{
@@ -736,14 +783,20 @@ namespace ICSharpCode.SharpZipLib.Zip
 		public Encoding ZipCryptoEncoding
 		{
 			get => _stringCodec.ZipCryptoEncoding;
-			set => _stringCodec.ZipCryptoEncoding = value;
+			set => _stringCodec = _stringCodec.WithZipCryptoEncoding(value);
 		}
 
-		/// <inheritdoc cref="StringCodec"/>
+		/// <inheritdoc cref="Zip.StringCodec"/>
 		public StringCodec StringCodec
 		{
-			get => _stringCodec;
-			set => _stringCodec = value;
+			set {
+				_stringCodec = value;
+				if (!isNewArchive_)
+				{
+					// Since the string codec was changed
+					ReadEntries();
+				}
+			}
 		}
 
 		#endregion Properties
@@ -757,7 +810,31 @@ namespace ICSharpCode.SharpZipLib.Zip
 		/// <exception cref="ObjectDisposedException">
 		/// The Zip file has been closed.
 		/// </exception>
-		public IEnumerator GetEnumerator()
+		IEnumerator IEnumerable.GetEnumerator()
+		{
+			return GetEnumerator();
+		}
+
+		/// <summary>
+		/// Gets an enumerator for the Zip entries in this Zip file.
+		/// </summary>
+		/// <returns>Returns an <see cref="IEnumerator"/> for this archive.</returns>
+		/// <exception cref="ObjectDisposedException">
+		/// The Zip file has been closed.
+		/// </exception>
+		IEnumerator<ZipEntry> IEnumerable<ZipEntry>.GetEnumerator()
+		{
+			return GetEnumerator();
+		}
+
+		/// <summary>
+		/// Gets an enumerator for the Zip entries in this Zip file.
+		/// </summary>
+		/// <returns>Returns an <see cref="IEnumerator"/> for this archive.</returns>
+		/// <exception cref="ObjectDisposedException">
+		/// The Zip file has been closed.
+		/// </exception>
+		public ZipEntryEnumerator GetEnumerator()
 		{
 			if (isDisposed_)
 			{
@@ -901,7 +978,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 
 				case CompressionMethod.Deflated:
 					// No need to worry about ownership and closing as underlying stream close does nothing.
-					result = new InflaterInputStream(result, new Inflater(true));
+					result = new InflaterInputStream(result, InflaterPool.Instance.Rent(true));
 					break;
 
 				case CompressionMethod.BZip2:
@@ -1592,7 +1669,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 				{
 					RunUpdates();
 				}
-				else if (commentEdited_)
+				else if (commentEdited_ && !isNewArchive_)
 				{
 					UpdateCommentOnly();
 				}
@@ -3781,7 +3858,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 		private static void WriteEncryptionHeader(Stream stream, long crcValue)
 		{
 			byte[] cryptBuffer = new byte[ZipConstants.CryptoHeaderSize];
-			using (var rng = new RNGCryptoServiceProvider())
+			using (var rng = RandomNumberGenerator.Create())
 			{
 				rng.GetBytes(cryptBuffer);
 			}
@@ -3948,20 +4025,26 @@ namespace ICSharpCode.SharpZipLib.Zip
 		/// <summary>
 		/// An <see cref="IEnumerator">enumerator</see> for <see cref="ZipEntry">Zip entries</see>
 		/// </summary>
-		private class ZipEntryEnumerator : IEnumerator
+		public struct ZipEntryEnumerator : IEnumerator<ZipEntry>
 		{
 			#region Constructors
 
+			/// <summary>
+			/// Constructs a new instance of <see cref="ZipEntryEnumerator"/>.
+			/// </summary>
+			/// <param name="entries">Entries to iterate.</param>
 			public ZipEntryEnumerator(ZipEntry[] entries)
 			{
 				array = entries;
+				index = -1;
 			}
 
 			#endregion Constructors
 
 			#region IEnumerator Members
 
-			public object Current
+			/// <inheritdoc />
+			public ZipEntry Current
 			{
 				get
 				{
@@ -3969,14 +4052,24 @@ namespace ICSharpCode.SharpZipLib.Zip
 				}
 			}
 
+			/// <inheritdoc />
+			object IEnumerator.Current => Current;
+
+			/// <inheritdoc />
 			public void Reset()
 			{
 				index = -1;
 			}
 
+			/// <inheritdoc />
 			public bool MoveNext()
 			{
 				return (++index < array.Length);
+			}
+
+			/// <inheritdoc />
+			public void Dispose()
+			{
 			}
 
 			#endregion IEnumerator Members
@@ -3984,7 +4077,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 			#region Instance Fields
 
 			private ZipEntry[] array;
-			private int index = -1;
+			private int index;
 
 			#endregion Instance Fields
 		}
